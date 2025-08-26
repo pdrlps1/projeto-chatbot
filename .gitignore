@@ -1,0 +1,63 @@
+# ===================================
+# Node.js
+# ===================================
+
+# Dependências
+node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Arquivos temporários
+*.tmp
+*.swp
+*.swo
+
+# Cache de pacotes
+.pnpm-debug.log
+.cache/
+.parcel-cache/
+
+# ===================================
+# Build
+# ===================================
+
+# Pastas de build/output
+dist/
+build/
+.out/
+.vercel/
+.netlify/
+
+# ===================================
+# Configuração local
+# ===================================
+
+# Variáveis de ambiente
+.env
+.env.*.local
+
+# Wrangler (Cloudflare Workers)
+wrangler.toml
+
+# Se você quiser versionar o wrangler.toml,
+# troque por wrangler.local.toml no ignore
+# e mantenha só esse fora do Git.
+
+# ===================================
+# IDEs/Editor
+# ===================================
+
+# VSCode
+.vscode/
+.history/
+
+# JetBrains
+.idea/
+
+# Mac / Linux / Windows
+.DS_Store
+Thumbs.db
