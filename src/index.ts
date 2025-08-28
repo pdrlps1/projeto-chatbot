@@ -1,10 +1,21 @@
 // src/index.ts
+
+import {
+  createConversation,
+  getConversation,
+  updateConversation,
+  insertMessage,
+  listMessages,
+  getTenantBySlug,
+  getTenantById,
+} from "./db";
 import { PLAYBOOKS, type TenantId } from "./playbooks";
 import { buildMessages, buildSystemPrompt } from "./prompt";
 
 export interface Env {
-  AI: Ai;            // binding do Workers AI
-  MODEL?: string;    // opcional: ex.: "@cf/meta/llama-3.1-8b-instruct"
+  AI: Ai; // binding do Workers AI
+  DB: D1Database;
+  MODEL?: string; // opcional: ex.: "@cf/meta/llama-3.1-8b-instruct"
 }
 
 // util: stream de linhas JSON no formato que seu front já espera
@@ -26,12 +37,16 @@ function streamJsonLines(text: string): ReadableStream {
         setTimeout(push, 10);
       }
       push();
-    }
+    },
   });
 }
 
 type ChatMsg = { role: "user" | "assistant"; content: string };
-type Flow = { phase?: 0 | 1 | 2 | 3 | undefined; nome?: string; motivo?: string };
+type Flow = {
+  phase?: 0 | 1 | 2 | 3 | undefined;
+  nome?: string;
+  motivo?: string;
+};
 
 export default {
   async fetch(req, env): Promise<Response> {
@@ -41,86 +56,184 @@ export default {
     if (url.pathname === "/profiles" && req.method === "GET") {
       const items = Object.keys(PLAYBOOKS).map((id) => ({
         id,
-        name: PLAYBOOKS[id as TenantId].domain
+        name: PLAYBOOKS[id as TenantId].domain,
       }));
       return Response.json({ profiles: items });
     }
 
-    // chat (streaming)
+    // POST /api/chat { conversationId, message }
     if (url.pathname === "/api/chat" && req.method === "POST") {
       try {
-        const body = await req.json().catch(() => ({})) as {
-          messages?: ChatMsg[];
-          tenantId?: TenantId;
-          flow?: Flow;
+        const body = (await req.json().catch(() => ({}))) as {
+          conversationId?: string;
+          message?: string;
         };
 
-        const tenantId = (body.tenantId ?? "clinica_demo") as TenantId;
-        const msgs = body.messages ?? [];
-        const flow = body.flow ?? { phase: 0 };
+        const message = (body.message ?? "").trim();
+        if (!message)
+          return Response.json(
+            { error: 'campo "message" é obrigatório' },
+            { status: 400 }
+          );
 
-        const pb = PLAYBOOKS[tenantId];
-        if (!pb) {
-          return Response.json({ error: `tenantId inválido: ${tenantId}` }, { status: 400 });
+        // compat: se não vier conversationId, cria uma sessão default
+        let conversationId = body.conversationId;
+        let conv = conversationId
+          ? await getConversation(env, conversationId)
+          : undefined;
+
+        if (!conv) {
+          // cria sessão default em clinica_demo
+          const created = await createConversation(env, "t_clinica"); // ou mapeie pelo PLAYBOOKS se preferir
+          conversationId = created.id;
+          conv = await getConversation(env, conversationId);
+          // saudação já foi inserida na rota /api/session; aqui seguimos direto
         }
 
-        // 1) mini-fluxo (nome → motivo), sem gastar IA
-        if (flow.phase === 0) {
-          const stream = streamJsonLines("Olá! Para começar, qual é o seu nome?");
-          return new Response(stream, { headers: { "Content-Type": "application/json" } });
+        // Salva mensagem do usuário
+        await insertMessage(env, conversationId!, "user", message);
+
+        // Deriva tenant a partir do conversations.tenant_id → mapeie para seu PLAYBOOKS
+        // Nesta sprint, vamos assumir:
+        // t_clinica -> "clinica_demo", t_imob -> "imobiliaria_demo"
+        const tenantMap: Record<string, TenantId> = {
+          t_clinica: "clinica_demo",
+          t_imob: "imobiliaria_demo",
+        };
+        // depois de obter 'conv'
+        const tenant = await getTenantById(env, conv.tenant_id);
+        const tenantSlug = (tenant?.slug ?? "clinica_demo") as TenantId;
+        const pb = PLAYBOOKS[tenantSlug];
+
+        // Mini-engine de fases no servidor
+        const phase = Number(conv.phase ?? 0);
+
+        if (phase === 0) {
+          await updateConversation(env, conversationId!, { phase: 1 });
+          const stream = streamJsonLines(
+            "Olá! Para começar, qual é o seu nome?"
+          );
+          await insertMessage(
+            env,
+            conversationId!,
+            "assistant",
+            "Olá! Para começar, qual é o seu nome?"
+          );
+          return new Response(stream, {
+            headers: { "Content-Type": "application/json" },
+          });
         }
 
-        // última mensagem do usuário
-        const lastUser = [...msgs].reverse().find(m => m.role === "user")?.content?.trim() || "";
-
-        if (flow.phase === 1) {
-          const nome = lastUser || "cliente";
-          const stream = streamJsonLines(`Prazer, ${nome}! Qual é o motivo do seu contato?`);
-          return new Response(stream, { headers: { "Content-Type": "application/json" } });
+        if (phase === 1) {
+          // assume a última msg como nome
+          await updateConversation(env, conversationId!, {
+            phase: 2,
+            nome: message,
+          });
+          const reply = `Prazer, ${message}! Qual é o motivo do seu contato?`;
+          await insertMessage(env, conversationId!, "assistant", reply);
+          return new Response(streamJsonLines(reply), {
+            headers: { "Content-Type": "application/json" },
+          });
         }
 
-        if (flow.phase === 2 && flow.nome && !flow.motivo) {
-          // 2) agora usamos IA para acolher no contexto do tenant
+        if (phase === 2) {
+          // agora coletamos motivo e pedimos acolhimento ao modelo
+          await updateConversation(env, conversationId!, {
+            phase: 3,
+            motivo: message,
+          });
+
           const system = [
             buildSystemPrompt(pb),
             `NUNCA responda fora do domínio "${pb.domain}". Se fugir do escopo, ofereça encaminhar para humano.`,
-            `Responda em pt-BR, breve, com no máximo uma pergunta por vez.`
+            `Responda em pt-BR, breve, com no máximo uma pergunta por vez.`,
           ].join("\n");
 
-          const model = (env.MODEL ?? "@cf/meta/llama-3.1-8b-instruct") as keyof AiModels;
+          // histórico curto do DB
+          const history = await listMessages(env, conversationId!, 12);
+          const model = (env.MODEL ??
+            "@cf/meta/llama-3.1-8b-instruct") as keyof AiModels;
 
           const userSummary = [
             "Gere uma saudação de acolhimento e próximos passos, mantendo o contexto do domínio.",
-            `Nome: ${flow.nome}`,
-            `Motivo: ${lastUser || "não informado"}`
+            `Nome: ${conv.nome ?? "cliente"}`,
+            `Motivo: ${message}`,
           ].join("\n");
 
-          const response = await env.AI.run(model, {
+          const result = await env.AI.run(model, {
             messages: [
               { role: "system", content: system },
-              // histórico curto para manter tom
-              ...msgs.slice(-6),
+              ...history,
               { role: "user", content: userSummary },
-            ]
+            ],
           });
 
-          const text = (response as any)?.response || "Obrigado! Vamos prosseguir com seu atendimento agora.";
-          const stream = streamJsonLines(text);
-          return new Response(stream, { headers: { "Content-Type": "application/json" } });
+          const text =
+            (result as any)?.response ||
+            "Obrigado! Vamos prosseguir com seu atendimento.";
+          await insertMessage(env, conversationId!, "assistant", text);
+          return new Response(streamJsonLines(text), {
+            headers: { "Content-Type": "application/json" },
+          });
         }
 
-        // fallback: se chegar aqui, só humaniza a última pergunta dentro do contexto
+        // fase >= 3 → conversa livre no contexto
         {
           const system = buildSystemPrompt(pb);
-          const model = (env.MODEL ?? "@cf/meta/llama-3.1-8b-instruct") as keyof AiModels;
-          const response = await env.AI.run(model, { messages: [{ role: "system", content: system }, ...msgs.slice(-10)] });
-          const text = (response as any)?.response || "Certo, como posso ajudar?";
-          const stream = streamJsonLines(text);
-          return new Response(stream, { headers: { "Content-Type": "application/json" } });
+          const history = await listMessages(env, conversationId!, 12);
+          const model = (env.MODEL ??
+            "@cf/meta/llama-3.1-8b-instruct") as keyof AiModels;
+
+          const result = await env.AI.run(model, {
+            messages: [{ role: "system", content: system }, ...history],
+          });
+
+          const text = (result as any)?.response || "Certo, como posso ajudar?";
+          await insertMessage(env, conversationId!, "assistant", text);
+          return new Response(streamJsonLines(text), {
+            headers: { "Content-Type": "application/json" },
+          });
         }
       } catch (e: any) {
-        return Response.json({ error: e?.message || "internal_error" }, { status: 500 });
+        return Response.json(
+          { error: e?.message || "internal_error" },
+          { status: 500 }
+        );
       }
+    }
+
+    // POST /api/session { tenantId: <slug> }
+    if (url.pathname === "/api/session" && req.method === "POST") {
+      const body = (await req.json().catch(() => ({}))) as {
+        tenantId?: TenantId;
+      };
+      const tenantSlug = (body.tenantId ?? "clinica_demo") as TenantId;
+
+      // 1) resolve slug -> id no banco
+      const tenantRow = await getTenantBySlug(env, tenantSlug);
+      if (!tenantRow) {
+        return Response.json(
+          { error: `tenant não encontrado: ${tenantSlug}` },
+          { status: 400 }
+        );
+      }
+
+      // 2) cria conversa com o **id** real
+      const conv = await createConversation(env, tenantRow.id);
+
+      await insertMessage(
+        env,
+        conv.id,
+        "assistant",
+        "Olá! Para começar, qual é o seu nome?"
+      );
+
+      return Response.json({
+        conversationId: conv.id,
+        reply: "Olá! Para começar, qual é o seu nome?",
+        phase: 1,
+      });
     }
 
     // sirva seu index.html e chat.js como já estão (se o template não fizer isso automaticamente)
@@ -130,5 +243,5 @@ export default {
     }
 
     return new Response("Not found", { status: 404 });
-  }
+  },
 } satisfies ExportedHandler<Env>;
