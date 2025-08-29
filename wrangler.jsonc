@@ -18,11 +18,11 @@
     "binding": "AI"
   },
   "upload_source_maps": true,
-    "d1_databases": [
+  "d1_databases": [
     {
       "binding": "DB",
       "database_name": "chatbot_db",
-      "database_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+      "database_id": "08623a6d-b3e7-4f3f-8feb-6343d57565e5"
     }
   ]
 }
