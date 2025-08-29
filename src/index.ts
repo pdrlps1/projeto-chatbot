@@ -179,17 +179,40 @@ export default {
         }
 
         // fase >= 3 → conversa livre no contexto
+        // fase >= 3 → conversa livre, sem recomeçar apresentação
         {
-          const system = buildSystemPrompt(pb);
           const history = await listMessages(env, conversationId!, 12);
           const model = (env.MODEL ??
             "@cf/meta/llama-3.1-8b-instruct") as keyof AiModels;
 
+          // estado atual da conversa, já com nome/motivo
+          const state = [
+            `ESTADO: fase=${conv.phase};`,
+            `nome=${conv.nome ?? "cliente"};`,
+            `motivo=${conv.motivo ?? "não informado"};`,
+          ].join(" ");
+
+          const system = [
+            buildSystemPrompt(pb),
+            // regras anti-repetição
+            "Regra anti-repetição:",
+            "- Você JÁ cumprimentou e JÁ coletou nome e motivo.",
+            "- NÃO se apresente novamente.",
+            "- NÃO peça o nome novamente.",
+            "- Prossiga objetivamente no assunto do usuário, 1 pergunta por vez, dentro do domínio.",
+          ].join("\n");
+
           const result = await env.AI.run(model, {
-            messages: [{ role: "system", content: system }, ...history],
+            messages: [
+              { role: "system", content: system },
+              { role: "system", content: state }, // deixa explícito pro modelo
+              ...history,
+            ],
           });
 
-          const text = (result as any)?.response || "Certo, como posso ajudar?";
+          const text =
+            (result as any)?.response ||
+            "Certo, vamos avançar a partir do que já combinamos.";
           await insertMessage(env, conversationId!, "assistant", text);
           return new Response(streamJsonLines(text), {
             headers: { "Content-Type": "application/json" },

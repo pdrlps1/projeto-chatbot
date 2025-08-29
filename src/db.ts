@@ -20,16 +20,13 @@ export async function getTenantById(env: { DB: D1Database }, id: string) {
 
 export async function createConversation(env: EnvLike, tenantId: string) {
   const stmt = env.DB.prepare(
-    "INSERT INTO conversations (tenant_id) VALUES (?1) RETURNING id, phase, status, created_at"
+    // já cria a conversa na fase 1 (pergunta do nome já foi feita pelo /api/session)
+    "INSERT INTO conversations (tenant_id, phase) VALUES (?1, 1) RETURNING id, phase, status, created_at"
   ).bind(tenantId);
   const { results } = await stmt.run();
-  return results?.[0] as {
-    id: string;
-    phase: number;
-    status: string;
-    created_at: string;
-  };
+  return results?.[0] as { id: string; phase: number; status: string; created_at: string };
 }
+
 
 export async function getConversation(env: EnvLike, id: string) {
   const stmt = env.DB.prepare(
