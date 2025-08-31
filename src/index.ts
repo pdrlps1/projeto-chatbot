@@ -41,6 +41,15 @@ function streamJsonLines(text: string): ReadableStream {
   });
 }
 
+function todayISO() {
+  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+}
+function addDaysISO(baseISO: string, delta: number) {
+  const d = new Date(baseISO + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + delta);
+  return d.toISOString().slice(0, 10);
+}
+
 type ChatMsg = { role: "user" | "assistant"; content: string };
 type Flow = {
   phase?: 0 | 1 | 2 | 3 | undefined;
@@ -263,6 +272,77 @@ export default {
     if (url.pathname === "/" && req.method === "GET") {
       // se o template já serve arquivos estáticos, ignore este bloco
       // você pode continuar usando o bundler do template
+    }
+
+    // GET /api/stats?tenantId=clinica_demo&from=2025-08-01&to=2025-08-29
+    if (url.pathname === "/api/stats" && req.method === "GET") {
+      const tenantSlug = (url.searchParams.get("tenantId") ??
+        "clinica_demo") as TenantId;
+      const tenantRow = await getTenantBySlug(env, tenantSlug);
+      if (!tenantRow)
+        return Response.json(
+          { error: `tenant não encontrado: ${tenantSlug}` },
+          { status: 400 }
+        );
+
+      const to = url.searchParams.get("to") ?? todayISO();
+      const from = url.searchParams.get("from") ?? addDaysISO(to, -29); // últimos 30 dias
+
+      // total de contatos no período
+      const totalQ = await env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM conversations WHERE tenant_id=?1 AND date(created_at) BETWEEN ?2 AND ?3"
+      )
+        .bind(tenantRow.id, from, to)
+        .all();
+      const totalContatos = Number(totalQ.results?.[0]?.c ?? 0);
+
+      // por dia (para gráfico)
+      const byDayQ = await env.DB.prepare(
+        `SELECT substr(created_at,1,10) AS day, COUNT(*) AS c
+     FROM conversations
+     WHERE tenant_id=?1 AND date(created_at) BETWEEN ?2 AND ?3
+     GROUP BY day ORDER BY day`
+      )
+        .bind(tenantRow.id, from, to)
+        .all();
+      const contatosPorDia = (byDayQ.results ?? []).map((r) => ({
+        day: r.day,
+        count: Number(r.c),
+      }));
+
+      // top motivos (normalizado simples)
+      const motivosQ = await env.DB.prepare(
+        `SELECT COALESCE(TRIM(LOWER(motivo)),'(vazio)') AS motivo, COUNT(*) AS c
+     FROM conversations
+     WHERE tenant_id=?1 AND motivo IS NOT NULL AND motivo != '' AND date(created_at) BETWEEN ?2 AND ?3
+     GROUP BY motivo ORDER BY c DESC LIMIT 5`
+      )
+        .bind(tenantRow.id, from, to)
+        .all();
+      const topMotivos = (motivosQ.results ?? []).map((r) => ({
+        motivo: r.motivo,
+        count: Number(r.c),
+      }));
+
+      // últimas conversas
+      const lastQ = await env.DB.prepare(
+        `SELECT id, substr(created_at,1,16) AS created_at, nome, motivo, phase, status
+     FROM conversations
+     WHERE tenant_id=?1 AND date(created_at) BETWEEN ?2 AND ?3
+     ORDER BY created_at DESC LIMIT 10`
+      )
+        .bind(tenantRow.id, from, to)
+        .all();
+      const ultimasConversas = lastQ.results ?? [];
+
+      return Response.json({
+        tenantId: tenantSlug,
+        range: { from, to },
+        totalContatos,
+        contatosPorDia,
+        topMotivos,
+        ultimasConversas,
+      });
     }
 
     return new Response("Not found", { status: 404 });

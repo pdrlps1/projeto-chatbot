@@ -186,3 +186,126 @@ async function sendMessage() {
     userInput.focus();
   }
 }
+
+// ----- Dashboard (MVP) -----
+const statsFrom = document.getElementById("stats-from");
+const statsTo = document.getElementById("stats-to");
+const statsBtn = document.getElementById("stats-refresh");
+const statsArea = document.getElementById("stats-area");
+
+function isoToday() {
+  return new Date().toISOString().slice(0, 10);
+}
+function isoAddDays(iso, d) {
+  const dt = new Date(iso + "T00:00:00Z");
+  dt.setUTCDate(dt.getUTCDate() + d);
+  return dt.toISOString().slice(0, 10);
+}
+
+function renderStats(data) {
+  const { totalContatos, contatosPorDia, topMotivos, ultimasConversas, range } =
+    data;
+  statsArea.innerHTML = `
+    <div style="display:flex;gap:12px;flex-wrap:wrap;">
+      <div style="flex:1;min-width:180px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:10px;">
+        <div style="color:#6b7280;font-size:12px;">Total de contatos</div>
+        <div style="font-size:22px;font-weight:700;">${totalContatos}</div>
+        <div style="color:#9ca3af;font-size:12px;">${range.from} → ${
+    range.to
+  }</div>
+      </div>
+      <div style="flex:2;min-width:260px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:10px;">
+        <div style="color:#6b7280;font-size:12px;margin-bottom:6px;">Contatos por dia</div>
+        <div style="font-family:monospace;white-space:pre-wrap;line-height:1.2;max-height:140px;overflow:auto;">${
+          contatosPorDia.length
+            ? contatosPorDia.map((d) => `${d.day}: ${d.count}`).join("\n")
+            : "—"
+        }</div>
+      </div>
+      <div style="flex:1;min-width:220px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:10px;">
+        <div style="color:#6b7280;font-size:12px;margin-bottom:6px;">Top motivos</div>
+        <ul style="margin-left:16px;">
+          ${
+            topMotivos.length
+              ? topMotivos
+                  .map((m) => `<li>${m.motivo} — <b>${m.count}</b></li>`)
+                  .join("")
+              : "<li>—</li>"
+          }
+        </ul>
+      </div>
+    </div>
+    <div style="margin-top:10px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:10px;">
+      <div style="color:#6b7280;font-size:12px;margin-bottom:6px;">Últimas conversas</div>
+      <table style="width:100%;border-collapse:collapse;">
+        <thead>
+          <tr style="text-align:left;border-bottom:1px solid #e5e7eb;">
+            <th style="padding:6px;">Data</th>
+            <th style="padding:6px;">Nome</th>
+            <th style="padding:6px;">Motivo</th>
+            <th style="padding:6px;">Fase</th>
+            <th style="padding:6px;">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            ultimasConversas.length
+              ? ultimasConversas
+                  .map(
+                    (c) => `
+                <tr>
+                  <td style="padding:6px;border-bottom:1px solid #f3f4f6;">${
+                    c.created_at
+                  }</td>
+                  <td style="padding:6px;border-bottom:1px solid #f3f4f6;">${
+                    c.nome ?? "—"
+                  }</td>
+                  <td style="padding:6px;border-bottom:1px solid #f3f4f6;">${
+                    c.motivo ?? "—"
+                  }</td>
+                  <td style="padding:6px;border-bottom:1px solid #f3f4f6;">${
+                    c.phase
+                  }</td>
+                  <td style="padding:6px;border-bottom:1px solid #f3f4f6;">${
+                    c.status
+                  }</td>
+                </tr>`
+                  )
+                  .join("")
+              : `<tr><td colspan="5" style="padding:8px;color:#9ca3af;">—</td></tr>`
+          }
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function loadStats() {
+  if (!tenantId) return;
+  const params = new URLSearchParams({
+    tenantId,
+    from: statsFrom.value || isoAddDays(isoToday(), -29),
+    to: statsTo.value || isoToday(),
+  });
+  const res = await fetch(`/api/stats?${params.toString()}`);
+  if (!res.ok) {
+    statsArea.textContent = "Falha ao carregar métricas.";
+    return;
+  }
+  const data = await res.json();
+  renderStats(data);
+}
+
+// init datas (últimos 30 dias)
+statsTo.value = isoToday();
+statsFrom.value = isoAddDays(statsTo.value, -29);
+
+// handlers
+statsBtn?.addEventListener("click", loadStats);
+profileSelect?.addEventListener("change", () => {
+  // já recarrega as métricas ao trocar de perfil
+  loadStats();
+});
+
+// carrega na primeira renderização (após perfis carregados)
+setTimeout(loadStats, 600);
